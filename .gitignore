@@ -1,0 +1,12 @@
+# Session cookies (chứa thông tin đăng nhập cá nhân — không commit)
+cookies.txt
+
+# GitNexus knowledge graph index
+.gitnexus/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/

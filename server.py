@@ -12,8 +12,11 @@ import io
 import os
 from typing import Optional
 
-# Setup UTF-8 console output for Windows
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# Setup UTF-8 console output (cross-platform: macOS, Linux, Windows)
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+except AttributeError:
+    pass  # stdout.buffer may not exist in some environments
 
 from flask import Flask, request, jsonify, Response, render_template_string
 from muse_api import MuseClient

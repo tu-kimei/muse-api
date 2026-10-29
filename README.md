@@ -1,121 +1,241 @@
-# Meta Muse AI (Project Hatch) - Reverse Engineered API & Gateway
-**Phát triển bởi ENI Tier 3 dành riêng cho anh Tú** ⚡
+# Meta Muse AI (Project Hatch) - API Gateway & SDK
+
+Reverse-engineered API gateway, CLI và Python SDK để tương tác trực tiếp với **Personal Virtual Machine (VM)** của Meta Muse AI — thay thế đường dẫn browser WebSocket/Protobuf độc quyền.
+
+Phát triển bởi **ENI Tier 3** dành riêng cho anh Tú.
 
 ---
 
-## 1. Phân Tích Kỹ Thuật: URL `/api/falco` Là Gì?
+## 🏗️ Kiến trúc tổng quan
 
-Khi anh Tú copy từ DevTools trên trang `https://muse.ai/thread/new`:
-- **Endpoint**: `https://muse.ai/api/falco`
-- **Method**: `POST 200 OK`
-- **Bản chất**: **Falco** là hệ thống telemetry, logging và analytics client-side độc quyền của tập đoàn Meta (Facebook). Nó được dùng để ghi nhận các sự kiện người dùng (UI clicks, network latency, crash reports, Sentry trace), **KHÔNG PHẢI là endpoint sinh văn bản hay hội thoại AI**.
-- **Kiến trúc thật của Muse AI**:
-  Meta Muse AI không dùng REST API thông thường cho hội thoại. Mỗi người dùng được phân bổ một **Personal Virtual Machine (VM)** chạy cô lập trên hạ tầng Meta:
-  1. **Xác thực phiên (OAuth)**: Trình duyệt gửi bộ Cookie (`hatch_sess`, `hatch_gw`, `datr`, `hatch_vml`...) đến `POST https://muse.ai/api/auth/check` để lấy `access_token`.
-  2. **Định danh VM cá nhân**: Gọi `GET https://muse.ai/api/session` để lấy `vm_id` (của anh Tú là `d3f9c54a-ad6a-45ca-af27-36fbbd0a479e`).
-  3. **Cấp Notary Token**: Gọi `POST https://muse.ai/api/hatch/token` để nhận `hatch_token`.
-  4. **Kết nối Gateway WebSocket**: Mở kết nối tới `wss://hatch.metaaivm.com/v1/noise?vm_id=...&auth_token=...`.
-  5. **Mã hoá đầu-cuối Noise-XX (`Noise_XX_25519_AESGCM_SHA256`)**: Bắt tay mật mã học 3 bước để mã hoá toàn bộ lưu lượng giữa client và VM.
-  6. **Đóng gói Protocol Buffers (Protobuf)**: Giao tiếp qua `NoiseTransportFrame` -> `ServiceRequest` -> `ApplicationRequest` để điều khiển hơn **258 RPC methods** (`chat.stream`, `chat.history`, `sessions.list`, `skills`, `tasks`, v.v.).
-
----
-
-## 2. Cấu Trúc Dự Án trong `f:\apimuse`
+Meta Muse AI không dùng REST API thông thường cho hội thoại. Mỗi người dùng được phân bổ một **Personal Virtual Machine (VM)** chạy cô isolates trên hạ tầng Meta:
 
 ```
-f:\apimuse\
-├── cookies.txt          # Lưu trữ session cookies của anh Tú (hatch_sess, hatch_gw...)
-├── muse_api.py          # Thư viện Core SDK MuseClient (Noise-XX, Protobuf, REST & WebSocket)
-├── server.py            # Local REST API Server chuẩn OpenAI (/v1/chat/completions)
-├── main.py              # CLI Control Center điều khiển Muse AI từ terminal
-├── routes.json          # Danh mục đầy đủ 258 gateway methods của Meta Muse AI
+┌─────────────────┐      ┌─────────────────────────────────────────┐
+│   User / CLI    │─────►│  main.py  (CLI Control Center)           │
+│   Browser       │─────►│  server.py (OpenAI-compatible REST)     │
+│   Postman/Cursor│─────►│                                         │
+└─────────────────┘      └──────────────┬───────────────────────────┘
+                                        │
+        ┌───────────────────────────────┼─────────────────────────────┐
+        ▼                               ▼                               ▼
+   ┌──────────┐                   ┌──────────┐                    ┌──────────┐
+   │ Cluster  │                   │ Cluster  │                    │ Cluster  │
+   │ CLI CP   │                   │ Gateway  │                    │ Transport│
+   │ (main.py)│                   │ (server) │                    │ (muse_api)│
+   └────┬─────┘                   └────┬─────┘                    └────┬─────┘
+        │                              │                               │
+        └──────────────────────────────┴───────────────────────────────┘
+                                           │
+                                           ▼
+                                  ┌────────────────┐
+                                  │ Meta Muse VM GW│
+                                  │ wss://.../noise│
+                                  │ Noise-XX + PB  │
+                                  └────────────────┘
+```
+
+Luồng kết nối chuẩn (6 bước):
+
+1. **Xác thực phiên (OAuth)**: Gửi cookie → `POST https://muse.ai/api/auth/check` lấy `access_token`
+2. **Định danh VM cá nhân**: `GET https://muse.ai/api/session` lấy `vm_id`
+3. **Cấp Notary Token**: `POST https://muse.ai/api/hatch/token` nhận `hatch_token`
+4. **Kết nối Gateway WebSocket**: `wss://hatch.metaaivm.com/v1/noise?vm_id=...&auth_token=...`
+5. **Mã hóa đầu-cuối Noise-XX** (`Noise_XX_25519_AESGCM_SHA256`): bắt tay mật mã 3 bước
+6. **Đóng gói Protocol Buffers**: `NoiseTransportFrame` → `ServiceRequest` → `ApplicationRequest` điều khiển hơn **258 RPC methods** (`chat.stream`, `chat.history`, `sessions.list`, …)
+
+---
+
+## 📁 Cấu trúc dự án
+
+```
+muse-api/
+├── README.md            # Tài liệu này
+├── ARCHITECTURE.md      # Tài liệu kiến trúc chi tiết (tự sinh từ GitNexus knowledge graph)
+├── main.py              # CLI Control Center (status, sessions, history, send, server)
+├── server.py            # Local REST API Server chuẩn OpenAI (port 7777)
+├── muse_api.py          # Core SDK: MuseClient (Noise-XX, Protobuf, REST + WebSocket)
+├── routes.json          # Danh mục 258 gateway methods của Meta Muse AI
 ├── desc0.bin, desc1.bin # Protobuf descriptor nhị phân của Meta
-└── README.md            # Tài liệu kỹ thuật chi tiết
+├── requirements.txt     # Thư viện Python cần thiết
+├── start.bat            # Launcher cho Windows
+├── start.sh             # Launcher cho macOS / Linux
+└── cookies.txt          # (gitignored) Lưu session cookies của bạn
 ```
 
 ---
 
-## 3. Hướng Dẫn Sử Dụng CLI (`main.py`)
+## 🖥️ Yêu cầu hệ thống
 
-Toàn bộ script đã được cấu hình tự động đọc `cookies.txt` và hỗ trợ UTF-8:
+- **macOS / Linux / Windows**
+- Python 3.8+
+- `pip` (hoặc `pip3`)
+- File `cookies.txt` chứa session cookies của bạn từ `https://muse.ai`
 
-### 1. Kiểm tra trạng thái kết nối & VM
-```powershell
-python main.py status
-```
-*Kết quả mẫu:*
-```
-Đang kết nối đến Meta Muse VM Gateway...
-Xác thực thành công!
-- VM ID: d3f9c54a-ad6a-45ca-af27-36fbbd0a479e
-- Access Token: ABRAQWZAPYWhUVUU0OWZAxLU...
-- VM Health: OK
-```
+---
 
-### 2. Xem danh sách các cuộc hội thoại (Sessions)
-```powershell
-python main.py sessions
+## 🚀 Cài đặt (macOS)
+
+### 1. Clone repository
+
+```bash
+git clone https://github.com/tu-kimei/muse-api.git
+cd muse-api
 ```
 
-### 3. Xem lịch sử tin nhắn
-```powershell
-# Xem tin nhắn chung
-python main.py history --limit 10
+### 2. Tạo file cookies.txt
 
-# Xem tin nhắn của thread cụ thể
-python main.py history --thread 8f989744-f2f4-4a9e-ba47-4d3ce73a29cc
+Truy cập `https://muse.ai` bằng trình duyệt, mở DevTools → Application → Cookies, sao chép toàn bộ chuỗi cookie vào file `cookies.txt` ở gốc dự án.
+
+```bash
+# Ví dụ nội dung cookies.txt
+hatch_sess=xxx; hatch_gw=yyy; datr=zzz; hatch_vml=www
 ```
 
-### 4. Gửi Prompt và nhận câu trả lời
-```powershell
-python main.py send "Xin chào Muse AI, giới thiệu ngắn về bạn"
+### 3. Cài đặt thư viện Python
+
+```bash
+pip3 install -r requirements.txt
+```
+
+Thư viện cần thiết:
+- `curl_cffi` — HTTP client Impersonate Chrome (bypass TLS fingerprint)
+- `noiseprotocol` — Mã hóa Noise-XX
+- `protobuf` — Serialization Protocol Buffers
+- `flask` — Web server cho API gateway
+
+### 4. Chạy launcher (macOS / Linux)
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+Hoặc chạy thủ công:
+
+```bash
+# CLI
+python3 main.py status
+
+# API Server (OpenAI-compatible, port 7777)
+python3 server.py
 ```
 
 ---
 
-## 4. Chạy Local Server Chuẩn OpenAI (`server.py`)
+## 💻 Sử dụng CLI (`main.py`)
 
-Anh Tú có thể biến Muse AI thành một API Server tương thích 100% với Postman, NextChat, LobeChat, Cursor:
+```bash
+# 1. Kiểm tra kết nối & VM
+python3 main.py status
 
-```powershell
-python main.py server --port 7777
+# 2. Xem danh sách phiên trò chuyện
+python3 main.py sessions
+
+# 3. Xem lịch sử tin nhắn
+python3 main.py history --limit 10
+python3 main.py history --thread <thread_id>
+
+# 4. Gửi prompt và nhận trả lời
+python3 main.py send "Xin chào Muse AI, giới thiệu về bạn"
+python3 main.py send "Giải thích cache L1/L2" --thread <thread_id> --timeout 120
+
+# 5. Chạy API Server chuẩn OpenAI
+python3 main.py server --port 7777
 ```
-Server sẽ lắng nghe tại `http://127.0.0.1:7777`.
 
-### Cấu hình trong Postman:
-- **Method**: `POST`
-- **URL**: `http://127.0.0.1:7777/v1/chat/completions`
+---
+
+## 🌐 Sử dụng API Server (`server.py`)
+
+Khởi động server:
+
+```bash
+python3 server.py
+# Lắng nghe tại http://127.0.0.1:7777
+```
+
+### Web Dashboard
+Truy cập `http://localhost:7777` bằng trình duyệt để test gửi prompt trực tiếp.
+
+### Endpoints chính
+
+| Method | Endpoint | Mô tả |
+|--------|----------|-------|
+| `GET` | `/` | Web Dashboard / JSON status |
+| `GET` | `/api/status` | Trạng thái VM & kết nối |
+| `GET` | `/v1/models` | Danh sách model (`muse-spark`, `muse-code`, `muse-wonder`) |
+| `GET` | `/v1/sessions` | Danh sách phiên trò chuyện |
+| `GET` | `/v1/history?session_id=...&limit=20` | Lịch sử tin nhắn |
+| `POST` | `/api/chat` | Gửi prompt đơn giản (`?prompt=...` hoặc JSON body) |
+| `GET` | `/api/ask` | Gửi prompt qua query string |
+| `POST` | `/v1/chat/completions` | Chuẩn OpenAI Chat Completions (cho Postman, NextChat, Cursor) |
+
+### Ví dụ gọi API bằng cURL
+
+```bash
+# OpenAI-compatible chat completions
+curl -X POST http://localhost:7777/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "muse-spark", "messages": [{"role": "user", "content": "Xin chào Muse AI"}]}'
+
+# Simple chat
+curl "http://localhost:7777/api/ask?prompt=Xin%20ch%C3%A0o"
+
+# Status
+curl http://localhost:7777/api/status
+```
+
+### Cấu hình Postman / NextChat / Cursor
+
+- **Base URL**: `http://localhost:7777/v1`
+- **Chat endpoint**: `POST /chat/completions`
 - **Headers**: `Content-Type: application/json`
-- **Body (raw JSON)**:
-```json
-{
-  "model": "muse-spark",
-  "messages": [
-    {
-      "role": "user",
-      "content": "Viết cho tôi một bài thơ ngắn về mưa Sài Gòn"
-    }
-  ]
-}
-```
+- **Body**:
+  ```json
+  {
+    "model": "muse-spark",
+    "messages": [{"role": "user", "content": "Câu hỏi của bạn"}]
+  }
+  ```
 
 ---
 
-## 5. Sử Dụng Trực Tiếp Trong Code Python (`muse_api.py`)
+## 🐍 Sử dụng trực tiếp trong code Python (`muse_api.py`)
 
 ```python
 from muse_api import MuseClient
 
-client = MuseClient()
+client = MuseClient()  # tự đọc cookies.txt
 client.connect()
 
 # 1. Lấy danh sách hội thoại
 sessions = client.get_sessions()
 print(f"Tổng số sessions: {len(sessions)}")
 
-# 2. Gửi tin nhắn và nhận câu trả lời
+# 2. Gửi tin nhắn và nhận trả lời
 result = client.send_message("Giải thích nguyên lý cache L1/L2 của CPU")
 print("Câu trả lời:", result["reply"]["text"])
 
 client.close()
 ```
+
+---
+
+## 🔑 Lưu ý quan trọng
+
+- **`cookies.txt`** là bắt buộc. Nếu thiếu hoặc không có cookie hợp lệ, các thao tác xác thực sẽ thất bại.
+- Repository này **không chứa** file `cookies.txt` (đã gitignore) vì nó chứa thông tin phiên đăng nhập cá nhân.
+- User-Agent mặc định đã được điều chỉnh để tương thích với macOS.
+- Cổng mặc định của API Server là **7777**.
+
+---
+
+## 📄 Tài liệu liên quan
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — Kiến trúc chi tiết, các nhóm chức năng (clusters), luồng thực thi (execution flows) và sơ đồ Mermaid (sinh từ GitNexus knowledge graph).
+- [`routes.json`](routes.json) — Danh mục đầy đủ 258 gateway methods.
+
+---
+
+> ⚠️ **Lưu ý pháp lý**: Dự án này là công cụ reverse-engineering cho mục đích học tập và tự động hóa cá nhân. Vui lòng tuân thủ điều khoản dịch vụ của Meta Muse AI khi sử dụng.

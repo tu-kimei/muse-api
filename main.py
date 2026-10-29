@@ -9,8 +9,11 @@ import json
 import argparse
 from muse_api import MuseClient
 
-# Ensure UTF-8 output on Windows console
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# Ensure UTF-8 output (cross-platform: macOS, Linux, Windows)
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+except AttributeError:
+    pass  # stdout.buffer may not exist in some environments
 
 
 def cmd_status(args):
