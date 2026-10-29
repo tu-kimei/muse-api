@@ -72,12 +72,14 @@ class MuseClient:
 
     def __init__(self, cookies_str: Optional[str] = None, cookies_path: str = "cookies.txt"):
         if cookies_str:
-            self.cookies = cookies_str.strip()
+            raw = cookies_str
         elif os.path.exists(cookies_path):
             with open(cookies_path, "r", encoding="utf-8") as f:
-                self.cookies = f.read().strip()
+                raw = f.read()
         else:
             raise MuseAuthError(f"Không tìm thấy cookies tại {cookies_path} và không có cookies_str")
+
+        self.cookies = self._parse_cookies(raw)
 
         self.node_id = secrets.token_hex(8)
         self.access_token: Optional[str] = None
@@ -86,6 +88,24 @@ class MuseClient:
         self.ws: Optional[WebSocket] = None
         self.noise: Optional[NoiseConnection] = None
         self.stream_id = 1
+
+    @staticmethod
+    def _parse_cookies(raw: str) -> str:
+        # Chấp nhận cả file một dòng `name=value` lẫn export dạng bảng
+        # (Chrome DevTools / Netscape) — các cột metadata (domain, path,
+        # expires, HttpOnly ✓, Secure ✓, SameSite...) được ngăn bởi TAB
+        # phía sau name=value. Chỉ giữ cặp đầu tiên trước TAB và loại bỏ
+        # ký tự non-ASCII để header Cookie hợp lệ với curl.
+        pairs = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            head = line.split("\t", 1)[0].strip()
+            if "=" in head:
+                pairs.append(head)
+        header = "; ".join(pairs)
+        return header.encode("ascii", errors="ignore").decode("ascii")
 
     def _headers(self, with_auth: bool = True) -> Dict[str, str]:
         h = {
@@ -115,7 +135,8 @@ class MuseClient:
         )
         if resp.status_code != 200:
             raise MuseAuthError(f"api/auth/check thất bại ({resp.status_code}): {resp.text[:200]}")
-        data = resp.json()
+        content = resp.content.decode("utf-8", errors="replace")
+        data = json.loads(content)
         self.access_token = data.get("access_token")
         if not self.access_token:
             raise MuseAuthError("Không tìm thấy access_token trong phản hồi auth/check")
@@ -129,7 +150,8 @@ class MuseClient:
         )
         if resp_sess.status_code != 200:
             raise MuseAuthError(f"api/session thất bại ({resp_sess.status_code}): {resp_sess.text[:200]}")
-        sess_data = resp_sess.json()
+        content_sess = resp_sess.content.decode("utf-8", errors="replace")
+        sess_data = json.loads(content_sess)
         self.vm_id = sess_data.get("vm_id")
         if not self.vm_id:
             raise MuseGatewayError(-1, f"Không tìm thấy vm_id: {sess_data}")
@@ -144,7 +166,8 @@ class MuseClient:
         )
         if resp_token.status_code != 200:
             raise MuseAuthError(f"api/hatch/token thất bại ({resp_token.status_code}): {resp_token.text[:200]}")
-        self.hatch_token = resp_token.json().get("token")
+        content_token = resp_token.content.decode("utf-8", errors="replace")
+        self.hatch_token = json.loads(content_token).get("token")
 
     def connect(self) -> None:
         """Thiết lập kết nối WebSocket và bắt tay mật mã Noise-XX."""
@@ -155,8 +178,16 @@ class MuseClient:
             f"wss://{GATEWAY_HOST}/v1/noise?vm_id={self.vm_id}"
             f"&auth_token={urllib.parse.quote(self.hatch_token, safe='')}"
         )
+        # Phải dùng curl_cffi WebSocket + impersonate="chrome" để qua được
+        # bot-detection của Meta edge (TLS/JA3 fingerprint). WebSocket thuần
+        # của websocket-client sẽ bị trả 401 ở handshake.
         self.ws = WebSocket()
-        self.ws.connect(url, impersonate="chrome", timeout=25, verify=True)
+        self.ws.connect(
+            url,
+            headers=self._headers(with_auth=False),
+            impersonate="chrome",
+            timeout=25,
+        )
 
         noise = NoiseConnection.from_name(b"Noise_XX_25519_AESGCM_SHA256")
         noise.set_as_initiator()
@@ -164,12 +195,12 @@ class MuseClient:
         noise.start_handshake()
 
         # Step 1: Client sends e
-        self.ws.send_bytes(bytes(noise.write_message(b"")))
+        self.ws.send_binary(bytes(noise.write_message(b"")))
         # Step 2: Server responds e, ee, s, es
         m2, _ = self.ws.recv()
         noise.read_message(bytes(m2))
         # Step 3: Client sends s, se
-        self.ws.send_bytes(bytes(noise.write_message(b"")))
+        self.ws.send_binary(bytes(noise.write_message(b"")))
 
         if not noise.handshake_finished:
             raise RuntimeError("Noise-XX handshake không hoàn tất thành công")
@@ -191,7 +222,8 @@ class MuseClient:
         fr = NoiseTransportFrame(
             chunk_id=chunk_id, chunk_index=0, total_chunks=1, payload=outer.SerializeToString()
         )
-        self.ws.send_bytes(bytes(self.noise.encrypt(fr.SerializeToString())))
+        encrypted = self.noise.encrypt(fr.SerializeToString())
+        self.ws.send_binary(encrypted)
 
     def _open_stream(self, method: str, body: Any = None, query: Optional[Dict] = None, path_params: Optional[Dict] = None) -> int:
         if method not in ROUTES:

@@ -27,6 +27,11 @@ if [ "$COOKIE_SIZE" -lt 20 ]; then
     exit 1
 fi
 
+# Kich hoa moit truong an neu co
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+fi
+
 echo "[1/2] Dang kiem tra thu vien Python..."
 python3 -m pip install -r requirements.txt --quiet --no-warn-script-location
 

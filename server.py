@@ -44,7 +44,7 @@ def add_cors_headers(response):
 
 
 # Giao diện Web UI hiện đại khi truy cập trực tiếp bằng trình duyệt vào http://localhost:7777
-HTML_DASHBOARD = """
+HTML_DASHBOARD = r"""
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -550,6 +550,8 @@ def chat_completions():
             },
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Lỗi khi gửi prompt tới Muse AI: {str(e)}"}), 500
 
 
