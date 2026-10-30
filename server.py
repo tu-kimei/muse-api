@@ -19,6 +19,7 @@ except AttributeError:
     pass  # stdout.buffer may not exist in some environments
 
 from flask import Flask, request, jsonify, Response, render_template_string
+from curl_cffi.curl import CurlError
 from muse_api import MuseClient
 
 app = Flask(__name__)
@@ -33,6 +34,27 @@ def get_client() -> MuseClient:
         _client = MuseClient()
         _client.connect()
     return _client
+
+
+def reset_client() -> None:
+    """Đóng và xoá client cache — buộc get_client() tạo kết nối mới."""
+    global _client
+    if _client is not None:
+        try:
+            _client.close()
+        except Exception:
+            pass
+    _client = None
+
+
+def with_reconnect(action):
+    """Gọi action(client); nếu WebSocket đã chết (edge Meta cắt kết nối sau
+    idle timeout) thì reconnect và thử lại một lần."""
+    try:
+        return action(get_client())
+    except (CurlError, BrokenPipeError, ConnectionError, OSError):
+        reset_client()
+        return action(get_client())
 
 
 @app.after_request
@@ -425,8 +447,7 @@ def list_models():
 @app.route("/v1/sessions", methods=["GET"])
 def get_sessions():
     try:
-        client = get_client()
-        sessions = client.get_sessions()
+        sessions = with_reconnect(lambda c: c.get_sessions())
         return jsonify({"object": "list", "sessions": sessions})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -437,8 +458,7 @@ def get_history():
     session_id = request.args.get("session_id")
     limit = int(request.args.get("limit", 20))
     try:
-        client = get_client()
-        history = client.get_history(session_id=session_id, limit=limit)
+        history = with_reconnect(lambda c: c.get_history(session_id=session_id, limit=limit))
         return jsonify({"object": "list", "history": history})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -467,8 +487,9 @@ def api_chat():
         return jsonify({"ok": False, "error": "Tham số prompt không được để trống (ví dụ: ?prompt=Xin chao)"}), 400
 
     try:
-        client = get_client()
-        result = client.send_message(text=prompt, session_id=session_id, wait_reply=True, timeout=timeout)
+        result = with_reconnect(lambda c: c.send_message(
+            text=prompt, session_id=session_id, wait_reply=True, timeout=timeout,
+        ))
         reply_obj = result.get("reply")
         reply_text = reply_obj.get("text", "") if reply_obj else "Không nhận được phản hồi từ Muse AI."
         
@@ -512,13 +533,13 @@ def chat_completions():
         last_user_msg = messages[-1].get("content", "")
 
     try:
-        client = get_client()
-        result = client.send_message(
+        result = with_reconnect(lambda c: c.send_message(
             text=last_user_msg,
             session_id=session_id,
             wait_reply=True,
             timeout=timeout,
-        )
+        ))
+        client = get_client()
 
         reply_obj = result.get("reply")
         reply_text = reply_obj.get("text", "") if reply_obj else "Không nhận được phản hồi từ Muse AI."
